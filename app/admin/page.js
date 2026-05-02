@@ -120,6 +120,24 @@ export default function AdminPage() {
     }
   }, [startLocalTick])
 
+  const applySavedState = useCallback((state) => {
+    setDuration(state.duration)
+    setRunningText(state.runningText ?? '')
+    lastTextRef.current = state.runningText ?? ''
+
+    if (state.status === 'running' && state.endsAt) {
+      setTimerStatus('running')
+      setRemaining(remainingFromEnd(state.endsAt))
+      startLocalTick(state.endsAt)
+      return
+    }
+
+    stopLocalTick()
+    endsAtRef.current = null
+    setTimerStatus(state.status === 'paused' ? 'paused' : 'idle')
+    setRemaining(state.remaining ?? 0)
+  }, [startLocalTick])
+
   useEffect(() => {
     const pusher = new Pusher(process.env.NEXT_PUBLIC_PUSHER_KEY, {
       cluster: process.env.NEXT_PUBLIC_PUSHER_CLUSTER,
@@ -134,6 +152,20 @@ export default function AdminPage() {
 
     return () => pusher.disconnect()
   }, [applyControl])
+
+  useEffect(() => {
+    const loadState = async () => {
+      try {
+        const response = await fetch('/api/state')
+        const result = await response.json()
+        if (result.success) applySavedState(result.state)
+      } catch (e) {
+        console.error('Load timer state error:', e)
+      }
+    }
+
+    loadState()
+  }, [applySavedState])
 
   // ── API helpers ────────────────────────────────────────────────────────────
   const broadcast = async (payload) => {

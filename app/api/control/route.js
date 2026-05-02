@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import pusher from '@/lib/pusher'
+import { saveTimerStateFromPayload } from '@/lib/timer-state'
 
 export async function POST(request) {
   try {
@@ -17,6 +18,7 @@ export async function POST(request) {
       payload.endsAt = now + payload.remaining * 1000
     }
 
+    await saveTimerStateFromPayload(payload)
     await pusher.trigger('seminar-timer', 'control', payload)
     return NextResponse.json({ success: true, payload })
   } catch (err) {

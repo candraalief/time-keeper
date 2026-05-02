@@ -165,6 +165,37 @@ export default function DisplayPage() {
 
   useEffect(() => () => stopTick(), [])
 
+  const applySavedState = useCallback((state) => {
+    setDuration(state.duration)
+    setRunningText(state.runningText ?? '')
+
+    if (state.status === 'running' && state.endsAt) {
+      setRemaining(remainingFromEnd(state.endsAt))
+      setStatus('running')
+      startTick(state.endsAt)
+      return
+    }
+
+    stopTick()
+    bellPlayedRef.current = false
+    setRemaining(state.remaining ?? 0)
+    setStatus(state.status === 'paused' ? 'paused' : state.status === 'done' ? 'done' : 'idle')
+  }, [startTick])
+
+  useEffect(() => {
+    const loadState = async () => {
+      try {
+        const response = await fetch('/api/state')
+        const result = await response.json()
+        if (result.success) applySavedState(result.state)
+      } catch (e) {
+        console.error('Load timer state error:', e)
+      }
+    }
+
+    loadState()
+  }, [applySavedState])
+
   // ── Pusher subscription ──────────────────────────────────────────────────
   useEffect(() => {
     const pusher = new Pusher(process.env.NEXT_PUBLIC_PUSHER_KEY, {
