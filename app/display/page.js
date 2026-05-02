@@ -11,6 +11,8 @@ const fmt = (s) => {
   return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
 }
 
+const remainingFromEnd = (endsAt) => Math.max(0, Math.ceil((endsAt - Date.now()) / 1000))
+
 // ─── Bell Sound via Web Audio API ────────────────────────────────────────────
 function playBell() {
   try {
@@ -72,6 +74,7 @@ export default function DisplayPage() {
   const intervalRef  = useRef(null)
   const wakeLockRef  = useRef(null)
   const hideTimerRef = useRef(null)
+  const bellPlayedRef = useRef(false)
 
   // ── Wake Lock setup ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -133,20 +136,27 @@ export default function DisplayPage() {
   }, [])
 
   // ── Countdown logic (local) ──────────────────────────────────────────────
-  const startTick = useCallback((startRemaining) => {
+  const startTick = useCallback((endsAt) => {
     if (intervalRef.current) clearInterval(intervalRef.current)
-    let rem = startRemaining
-    intervalRef.current = setInterval(() => {
-      rem--
+    bellPlayedRef.current = false
+
+    const syncRemaining = () => {
+      const rem = remainingFromEnd(endsAt)
       if (rem <= 0) {
         clearInterval(intervalRef.current)
         setRemaining(0)
         setStatus('done')
-        playBell()
+        if (!bellPlayedRef.current) {
+          bellPlayedRef.current = true
+          playBell()
+        }
       } else {
         setRemaining(rem)
       }
-    }, 1000)
+    }
+
+    syncRemaining()
+    intervalRef.current = setInterval(syncRemaining, 250)
   }, [])
 
   const stopTick = () => {
@@ -168,26 +178,28 @@ export default function DisplayPage() {
         case 'start':
           stopTick()
           setDuration(data.duration)
-          setRemaining(data.duration)
+          setRemaining(remainingFromEnd(data.endsAt ?? Date.now() + data.duration * 1000))
           setStatus('running')
-          if (data.runningText) setRunningText(data.runningText)
-          startTick(data.duration)
+          if (data.runningText !== undefined) setRunningText(data.runningText)
+          startTick(data.endsAt ?? Date.now() + data.duration * 1000)
           break
 
         case 'pause':
           stopTick()
+          bellPlayedRef.current = false
           setRemaining(data.remaining)
           setStatus('paused')
           break
 
         case 'resume':
-          setRemaining(data.remaining)
+          setRemaining(remainingFromEnd(data.endsAt ?? Date.now() + data.remaining * 1000))
           setStatus('running')
-          startTick(data.remaining)
+          startTick(data.endsAt ?? Date.now() + data.remaining * 1000)
           break
 
         case 'reset':
           stopTick()
+          bellPlayedRef.current = false
           setDuration(data.duration)
           setRemaining(data.duration)
           setStatus('idle')

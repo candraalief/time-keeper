@@ -16,6 +16,7 @@ const fmt = (s) => {
 }
 
 const clamp = (v, min, max) => Math.min(Math.max(v, min), max)
+const remainingFromEnd = (endsAt) => Math.max(0, Math.ceil((endsAt - Date.now()) / 1000))
 
 // ─── Component ───────────────────────────────────────────────────────────────
 export default function AdminPage() {
@@ -35,10 +36,90 @@ export default function AdminPage() {
 
   const intervalRef   = useRef(null)
   const remainingRef  = useRef(0)
+  const endsAtRef     = useRef(null)
+  const didMountRef   = useRef(false)
+  const lastTextRef   = useRef(runningText)
 
   useEffect(() => { remainingRef.current = remaining }, [remaining])
 
   // ── Pusher: subscribe so admin also mirrors display state ──────────────────
+  // ── Local countdown so admin screen reflects timer ─────────────────────────
+  const startLocalTick = useCallback((endsAt) => {
+    if (intervalRef.current) clearInterval(intervalRef.current)
+    endsAtRef.current = endsAt
+
+    const syncRemaining = () => {
+      const rem = remainingFromEnd(endsAt)
+      if (rem <= 0) {
+        clearInterval(intervalRef.current)
+        setTimerStatus('idle')
+      }
+      setRemaining(rem)
+      remainingRef.current = rem
+    }
+
+    syncRemaining()
+    intervalRef.current = setInterval(syncRemaining, 250)
+  }, [])
+
+  const stopLocalTick = () => {
+    if (intervalRef.current) clearInterval(intervalRef.current)
+  }
+
+  useEffect(() => () => stopLocalTick(), [])
+
+  const currentRemaining = useCallback(() => {
+    if (timerStatus === 'running' && endsAtRef.current) {
+      return remainingFromEnd(endsAtRef.current)
+    }
+    return remainingRef.current
+  }, [timerStatus])
+
+  const applyControl = useCallback((data) => {
+    switch (data.action) {
+      case 'start': {
+        const endsAt = data.endsAt ?? Date.now() + data.duration * 1000
+        setDuration(data.duration)
+        setRemaining(remainingFromEnd(endsAt))
+        setTimerStatus('running')
+        if (data.runningText !== undefined) setRunningText(data.runningText)
+        startLocalTick(endsAt)
+        break
+      }
+
+      case 'pause':
+        stopLocalTick()
+        endsAtRef.current = null
+        setRemaining(data.remaining)
+        setTimerStatus('paused')
+        break
+
+      case 'resume': {
+        const endsAt = data.endsAt ?? Date.now() + data.remaining * 1000
+        setRemaining(remainingFromEnd(endsAt))
+        setTimerStatus('running')
+        startLocalTick(endsAt)
+        break
+      }
+
+      case 'reset':
+        stopLocalTick()
+        endsAtRef.current = null
+        setDuration(data.duration)
+        setRemaining(data.duration)
+        setTimerStatus('idle')
+        break
+
+      case 'updateText':
+        setRunningText(data.runningText ?? '')
+        lastTextRef.current = data.runningText ?? ''
+        break
+
+      default:
+        break
+    }
+  }, [startLocalTick])
+
   useEffect(() => {
     const pusher = new Pusher(process.env.NEXT_PUBLIC_PUSHER_KEY, {
       cluster: process.env.NEXT_PUBLIC_PUSHER_CLUSTER,
@@ -48,30 +129,11 @@ export default function AdminPage() {
     pusher.connection.bind('disconnected', () => setIsConnected(false))
     pusher.connection.bind('error',        () => setIsConnected(false))
 
+    const channel = pusher.subscribe('seminar-timer')
+    channel.bind('control', applyControl)
+
     return () => pusher.disconnect()
-  }, [])
-
-  // ── Local countdown so admin screen reflects timer ─────────────────────────
-  const startLocalTick = useCallback((startRemaining) => {
-    if (intervalRef.current) clearInterval(intervalRef.current)
-    let rem = startRemaining
-    intervalRef.current = setInterval(() => {
-      rem--
-      if (rem <= 0) {
-        rem = 0
-        clearInterval(intervalRef.current)
-        setTimerStatus('idle')
-      }
-      setRemaining(rem)
-      remainingRef.current = rem
-    }, 1000)
-  }, [])
-
-  const stopLocalTick = () => {
-    if (intervalRef.current) clearInterval(intervalRef.current)
-  }
-
-  useEffect(() => () => stopLocalTick(), [])
+  }, [applyControl])
 
   // ── API helpers ────────────────────────────────────────────────────────────
   const broadcast = async (payload) => {
@@ -93,28 +155,34 @@ export default function AdminPage() {
   const handleStart = () => {
     const totalSec = inputMinutes * 60 + inputSeconds
     if (totalSec <= 0) return
+    const endsAt = Date.now() + totalSec * 1000
     setDuration(totalSec)
     setRemaining(totalSec)
     setTimerStatus('running')
-    startLocalTick(totalSec)
+    startLocalTick(endsAt)
     broadcast({ action: 'start', duration: totalSec, runningText })
   }
 
   const handleResume = () => {
-    const rem = remainingRef.current
+    const rem = currentRemaining()
+    const endsAt = Date.now() + rem * 1000
     setTimerStatus('running')
-    startLocalTick(rem)
+    startLocalTick(endsAt)
     broadcast({ action: 'resume', remaining: rem })
   }
 
   const handlePause = () => {
+    const rem = currentRemaining()
     stopLocalTick()
+    endsAtRef.current = null
     setTimerStatus('paused')
-    broadcast({ action: 'pause', remaining: remainingRef.current })
+    setRemaining(rem)
+    broadcast({ action: 'pause', remaining: rem })
   }
 
   const handleReset = () => {
     stopLocalTick()
+    endsAtRef.current = null
     const totalSec = inputMinutes * 60 + inputSeconds
     setDuration(totalSec)
     setRemaining(totalSec)
@@ -123,8 +191,24 @@ export default function AdminPage() {
   }
 
   const handleSendText = () => {
+    lastTextRef.current = runningText
     broadcast({ action: 'updateText', runningText })
   }
+
+  useEffect(() => {
+    if (!didMountRef.current) {
+      didMountRef.current = true
+      return
+    }
+
+    const sendTimer = setTimeout(() => {
+      if (runningText === lastTextRef.current) return
+      lastTextRef.current = runningText
+      broadcast({ action: 'updateText', runningText })
+    }, 500)
+
+    return () => clearTimeout(sendTimer)
+  }, [runningText])
 
   // ── Spinners ───────────────────────────────────────────────────────────────
   const adjustMinutes = (delta) => setInputMinutes(v => clamp(v + delta, 0, 999))
@@ -308,6 +392,7 @@ export default function AdminPage() {
             </button>
           </div>
           <p className="text-xs text-gray-600 mt-2">Tekan Enter atau klik kirim untuk update teks di layar display.</p>
+          <p className="text-xs text-gray-600 mt-1">Perubahan juga terkirim otomatis saat kamu mengetik.</p>
         </div>
 
       </div>
