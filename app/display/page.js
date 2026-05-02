@@ -12,6 +12,7 @@ const fmt = (s) => {
 }
 
 const remainingFromEnd = (endsAt) => Math.max(0, Math.ceil((endsAt - Date.now()) / 1000))
+const DEFAULT_TEXT_SIZE = 28
 
 // ─── Bell Sound via Web Audio API ────────────────────────────────────────────
 function playBell() {
@@ -68,6 +69,7 @@ export default function DisplayPage() {
   const [duration,    setDuration]    = useState(0)
   const [status,      setStatus]      = useState('idle')   // idle | running | paused | done
   const [runningText, setRunningText] = useState('Selamat Datang — Seminar Timekeeper')
+  const [runningTextSize, setRunningTextSize] = useState(DEFAULT_TEXT_SIZE)
   const [isFullscreen,setIsFullscreen]= useState(false)
   const [showControls,setShowControls]= useState(true)
 
@@ -168,6 +170,7 @@ export default function DisplayPage() {
   const applySavedState = useCallback((state) => {
     setDuration(state.duration)
     setRunningText(state.runningText ?? '')
+    setRunningTextSize(state.runningTextSize ?? DEFAULT_TEXT_SIZE)
 
     if (state.status === 'running' && state.endsAt) {
       setRemaining(remainingFromEnd(state.endsAt))
@@ -212,6 +215,7 @@ export default function DisplayPage() {
           setRemaining(remainingFromEnd(data.endsAt ?? Date.now() + data.duration * 1000))
           setStatus('running')
           if (data.runningText !== undefined) setRunningText(data.runningText)
+          if (Number.isFinite(data.runningTextSize)) setRunningTextSize(data.runningTextSize)
           startTick(data.endsAt ?? Date.now() + data.duration * 1000)
           break
 
@@ -238,6 +242,7 @@ export default function DisplayPage() {
 
         case 'updateText':
           setRunningText(data.runningText ?? '')
+          if (Number.isFinite(data.runningTextSize)) setRunningTextSize(data.runningTextSize)
           break
 
         default:
@@ -331,7 +336,10 @@ export default function DisplayPage() {
       {/* ── Running Text ── */}
       {runningText && (
         <div className="w-full bg-black/60 border-t border-white/10 py-3 overflow-hidden flex-shrink-0">
-          <div className="marquee-text text-white text-2xl md:text-3xl font-semibold tracking-wide px-4">
+          <div
+            className="marquee-text text-white font-semibold tracking-wide px-4"
+            style={{ fontSize: `${runningTextSize}px`, lineHeight: 1.2 }}
+          >
             {runningText}
             &ensp;·&ensp;
             {runningText}

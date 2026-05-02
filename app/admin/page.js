@@ -17,6 +17,7 @@ const fmt = (s) => {
 
 const clamp = (v, min, max) => Math.min(Math.max(v, min), max)
 const remainingFromEnd = (endsAt) => Math.max(0, Math.ceil((endsAt - Date.now()) / 1000))
+const DEFAULT_TEXT_SIZE = 28
 
 // ─── Component ───────────────────────────────────────────────────────────────
 export default function AdminPage() {
@@ -24,6 +25,7 @@ export default function AdminPage() {
   const [inputMinutes, setInputMinutes] = useState(10)
   const [inputSeconds, setInputSeconds] = useState(0)
   const [runningText, setRunningText]   = useState('')
+  const [runningTextSize, setRunningTextSize] = useState(DEFAULT_TEXT_SIZE)
 
   // Timer state (local mirror for admin UI)
   const [timerStatus, setTimerStatus]   = useState('idle')  // idle | running | paused
@@ -39,6 +41,7 @@ export default function AdminPage() {
   const endsAtRef     = useRef(null)
   const didMountRef   = useRef(false)
   const lastTextRef   = useRef(runningText)
+  const lastTextSizeRef = useRef(runningTextSize)
 
   useEffect(() => { remainingRef.current = remaining }, [remaining])
 
@@ -82,7 +85,14 @@ export default function AdminPage() {
         setDuration(data.duration)
         setRemaining(remainingFromEnd(endsAt))
         setTimerStatus('running')
-        if (data.runningText !== undefined) setRunningText(data.runningText)
+        if (data.runningText !== undefined) {
+          setRunningText(data.runningText)
+          lastTextRef.current = data.runningText ?? ''
+        }
+        if (Number.isFinite(data.runningTextSize)) {
+          setRunningTextSize(data.runningTextSize)
+          lastTextSizeRef.current = data.runningTextSize
+        }
         startLocalTick(endsAt)
         break
       }
@@ -113,6 +123,10 @@ export default function AdminPage() {
       case 'updateText':
         setRunningText(data.runningText ?? '')
         lastTextRef.current = data.runningText ?? ''
+        if (Number.isFinite(data.runningTextSize)) {
+          setRunningTextSize(data.runningTextSize)
+          lastTextSizeRef.current = data.runningTextSize
+        }
         break
 
       default:
@@ -124,6 +138,8 @@ export default function AdminPage() {
     setDuration(state.duration)
     setRunningText(state.runningText ?? '')
     lastTextRef.current = state.runningText ?? ''
+    setRunningTextSize(state.runningTextSize ?? DEFAULT_TEXT_SIZE)
+    lastTextSizeRef.current = state.runningTextSize ?? DEFAULT_TEXT_SIZE
 
     if (state.status === 'running' && state.endsAt) {
       setTimerStatus('running')
@@ -192,7 +208,7 @@ export default function AdminPage() {
     setRemaining(totalSec)
     setTimerStatus('running')
     startLocalTick(endsAt)
-    broadcast({ action: 'start', duration: totalSec, runningText })
+    broadcast({ action: 'start', duration: totalSec, runningText, runningTextSize })
   }
 
   const handleResume = () => {
@@ -224,7 +240,8 @@ export default function AdminPage() {
 
   const handleSendText = () => {
     lastTextRef.current = runningText
-    broadcast({ action: 'updateText', runningText })
+    lastTextSizeRef.current = runningTextSize
+    broadcast({ action: 'updateText', runningText, runningTextSize })
   }
 
   useEffect(() => {
@@ -234,13 +251,17 @@ export default function AdminPage() {
     }
 
     const sendTimer = setTimeout(() => {
-      if (runningText === lastTextRef.current) return
+      if (
+        runningText === lastTextRef.current &&
+        runningTextSize === lastTextSizeRef.current
+      ) return
       lastTextRef.current = runningText
-      broadcast({ action: 'updateText', runningText })
+      lastTextSizeRef.current = runningTextSize
+      broadcast({ action: 'updateText', runningText, runningTextSize })
     }, 500)
 
     return () => clearTimeout(sendTimer)
-  }, [runningText])
+  }, [runningText, runningTextSize])
 
   // ── Spinners ───────────────────────────────────────────────────────────────
   const adjustMinutes = (delta) => setInputMinutes(v => clamp(v + delta, 0, 999))
@@ -422,6 +443,19 @@ export default function AdminPage() {
             >
               <Send size={20} />
             </button>
+          </div>
+          <div className="mt-3 flex items-center gap-3">
+            <span className="text-xs text-gray-500 w-20">Ukuran teks</span>
+            <input
+              type="range"
+              min={16}
+              max={64}
+              step={1}
+              value={runningTextSize}
+              onChange={e => setRunningTextSize(Number(e.target.value))}
+              className="flex-1 accent-blue-500"
+            />
+            <span className="text-xs text-gray-400 w-12 text-right">{runningTextSize}px</span>
           </div>
           <p className="text-xs text-gray-600 mt-2">Tekan Enter atau klik kirim untuk update teks di layar display.</p>
           <p className="text-xs text-gray-600 mt-1">Perubahan juga terkirim otomatis saat kamu mengetik.</p>
