@@ -1,27 +1,19 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback } from 'react'
-import Pusher from 'pusher-js'
+import { useCallback, useEffect, useState } from 'react'
 import { Maximize2, Minimize2 } from 'lucide-react'
+import TimerDisplay from '@/components/display/TimerDisplay'
+import { usePusherControl } from '@/hooks/usePusher'
+import { useTimerState } from '@/hooks/useTimerState'
+import { useTimerTick } from '@/hooks/useTimerTick'
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-const fmt = (s) => {
-  const m = Math.floor(Math.abs(s) / 60)
-  const sec = Math.abs(s) % 60
-  return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
-}
-
-const remainingFromEnd = (endsAt) => Math.max(0, Math.ceil((endsAt - Date.now()) / 1000))
-const DEFAULT_TEXT_SIZE = 28
-
-// ─── Bell Sound via Web Audio API ────────────────────────────────────────────
 function playBell() {
   try {
     const ctx = new (window.AudioContext || window.webkitAudioContext)()
 
-    const playTone = (freq, startTime, duration, gain = 0.8) => {
-      const osc  = ctx.createOscillator()
-      const env  = ctx.createGain()
+    const playTone = (freq, startTime, duration, gain = 0.75) => {
+      const osc = ctx.createOscillator()
+      const env = ctx.createGain()
       const comp = ctx.createDynamicsCompressor()
 
       osc.connect(env)
@@ -30,9 +22,9 @@ function playBell() {
 
       osc.type = 'sine'
       osc.frequency.setValueAtTime(freq, startTime)
-      osc.frequency.exponentialRampToValueAtTime(freq * 0.7, startTime + duration)
+      osc.frequency.exponentialRampToValueAtTime(freq * 0.72, startTime + duration)
 
-      env.gain.setValueAtTime(0, startTime)
+      env.gain.setValueAtTime(0.001, startTime)
       env.gain.linearRampToValueAtTime(gain, startTime + 0.01)
       env.gain.exponentialRampToValueAtTime(0.001, startTime + duration)
 
@@ -40,314 +32,111 @@ function playBell() {
       osc.stop(startTime + duration)
     }
 
-    // Three-bell chime: C5, E5, G5
-    playTone(523.25, ctx.currentTime,       2.5)
-    playTone(659.25, ctx.currentTime + 0.6, 2.0)
-    playTone(783.99, ctx.currentTime + 1.2, 3.0)
-  } catch (e) {
-    console.warn('Bell audio error:', e)
+    playTone(523.25, ctx.currentTime, 1.8)
+    playTone(659.25, ctx.currentTime + 0.45, 1.6)
+    playTone(783.99, ctx.currentTime + 0.9, 2.2)
+  } catch (error) {
+    console.warn('Bell audio error:', error)
   }
 }
 
-// ─── Screen Wake Lock ─────────────────────────────────────────────────────────
 async function requestWakeLock() {
   try {
     if ('wakeLock' in navigator) {
-      const wakeLock = await navigator.wakeLock.request('screen')
-      console.log('Wake Lock: active')
-      return wakeLock
+      return await navigator.wakeLock.request('screen')
     }
-  } catch (e) {
-    console.warn('Wake Lock error:', e)
+  } catch (error) {
+    console.warn('Wake lock error:', error)
   }
   return null
 }
 
-// ─── Component ───────────────────────────────────────────────────────────────
 export default function DisplayPage() {
-  const [remaining,   setRemaining]   = useState(0)
-  const [duration,    setDuration]    = useState(0)
-  const [status,      setStatus]      = useState('idle')   // idle | running | paused | done
-  const [runningText, setRunningText] = useState('Selamat Datang — Seminar Timekeeper')
-  const [runningTextSize, setRunningTextSize] = useState(DEFAULT_TEXT_SIZE)
-  const [isFullscreen,setIsFullscreen]= useState(false)
-  const [showControls,setShowControls]= useState(true)
+  const [isFullscreen, setIsFullscreen] = useState(false)
+  const [showControls, setShowControls] = useState(true)
+  const { timerState, applyControl } = useTimerState({
+    onError: (error) => console.error('Display state error:', error),
+  })
+  const connectionState = usePusherControl(applyControl)
+  const tick = useTimerTick(timerState, playBell)
 
-  const intervalRef  = useRef(null)
-  const wakeLockRef  = useRef(null)
-  const hideTimerRef = useRef(null)
-  const bellPlayedRef = useRef(false)
-
-  // ── Wake Lock setup ──────────────────────────────────────────────────────
-  useEffect(() => {
-    let cleanupRequested = false
-
-    const acquireWakeLock = async () => {
-      const wakeLock = await requestWakeLock()
-      if (!wakeLock) return
-
-      if (cleanupRequested) {
-        wakeLock.release()
-      } else {
-        wakeLockRef.current = wakeLock
-      }
-    }
-
-    acquireWakeLock()
-
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') acquireWakeLock()
-    }
-    document.addEventListener('visibilitychange', onVisible)
-    return () => {
-      cleanupRequested = true
-      document.removeEventListener('visibilitychange', onVisible)
-      const wakeLock = wakeLockRef.current
-      wakeLockRef.current = null
-      if (wakeLock) wakeLock.release()
-    }
-  }, [])
-
-  // ── Auto-hide controls on idle ───────────────────────────────────────────
-  const resetHideTimer = useCallback(() => {
-    setShowControls(true)
-    clearTimeout(hideTimerRef.current)
-    hideTimerRef.current = setTimeout(() => setShowControls(false), 4000)
-  }, [])
-
-  useEffect(() => {
-    hideTimerRef.current = setTimeout(() => setShowControls(false), 4000)
-    return () => clearTimeout(hideTimerRef.current)
-  }, [])
-
-  // ── Fullscreen toggle ────────────────────────────────────────────────────
   const toggleFullscreen = useCallback(() => {
     if (!document.fullscreenElement) {
       document.documentElement.requestFullscreen()
-      setIsFullscreen(true)
     } else {
       document.exitFullscreen()
-      setIsFullscreen(false)
     }
   }, [])
 
-  useEffect(() => {
-    const handler = () => setIsFullscreen(!!document.fullscreenElement)
-    document.addEventListener('fullscreenchange', handler)
-    return () => document.removeEventListener('fullscreenchange', handler)
+  const revealControls = useCallback(() => {
+    setShowControls(true)
+    window.clearTimeout(window.__displayControlsTimer)
+    window.__displayControlsTimer = window.setTimeout(() => setShowControls(false), 3500)
   }, [])
 
-  // ── Countdown logic (local) ──────────────────────────────────────────────
-  const startTick = useCallback((endsAt) => {
-    if (intervalRef.current) clearInterval(intervalRef.current)
-    bellPlayedRef.current = false
-
-    const syncRemaining = () => {
-      const rem = remainingFromEnd(endsAt)
-      if (rem <= 0) {
-        clearInterval(intervalRef.current)
-        setRemaining(0)
-        setStatus('done')
-        if (!bellPlayedRef.current) {
-          bellPlayedRef.current = true
-          playBell()
-        }
-      } else {
-        setRemaining(rem)
-      }
-    }
-
-    syncRemaining()
-    intervalRef.current = setInterval(syncRemaining, 250)
-  }, [])
-
-  const stopTick = () => {
-    if (intervalRef.current) clearInterval(intervalRef.current)
-  }
-
-  useEffect(() => () => stopTick(), [])
-
-  const applySavedState = useCallback((state) => {
-    setDuration(state.duration)
-    setRunningText(state.runningText ?? '')
-    setRunningTextSize(state.runningTextSize ?? DEFAULT_TEXT_SIZE)
-
-    if (state.status === 'running' && state.endsAt) {
-      setRemaining(remainingFromEnd(state.endsAt))
-      setStatus('running')
-      startTick(state.endsAt)
-      return
-    }
-
-    stopTick()
-    bellPlayedRef.current = false
-    setRemaining(state.remaining ?? 0)
-    setStatus(state.status === 'paused' ? 'paused' : state.status === 'done' ? 'done' : 'idle')
-  }, [startTick])
-
   useEffect(() => {
-    const loadState = async () => {
-      try {
-        const response = await fetch('/api/state')
-        const result = await response.json()
-        if (result.success) applySavedState(result.state)
-      } catch (e) {
-        console.error('Load timer state error:', e)
-      }
+    let wakeLock
+    let cleanup = false
+
+    const acquire = async () => {
+      const lock = await requestWakeLock()
+      if (!lock) return
+      if (cleanup) lock.release()
+      else wakeLock = lock
     }
 
-    loadState()
-  }, [applySavedState])
+    acquire()
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') acquire()
+    }
+    const onFullscreen = () => setIsFullscreen(Boolean(document.fullscreenElement))
+    const onKeyDown = (event) => {
+      if (event.key.toLowerCase() === 'f') toggleFullscreen()
+    }
 
-  // ── Pusher subscription ──────────────────────────────────────────────────
-  useEffect(() => {
-    const pusher = new Pusher(process.env.NEXT_PUBLIC_PUSHER_KEY, {
-      cluster: process.env.NEXT_PUBLIC_PUSHER_CLUSTER,
-    })
-
-    const channel = pusher.subscribe('seminar-timer')
-
-    channel.bind('control', (data) => {
-      switch (data.action) {
-        case 'start':
-          stopTick()
-          setDuration(data.duration)
-          setRemaining(remainingFromEnd(data.endsAt ?? Date.now() + data.duration * 1000))
-          setStatus('running')
-          if (data.runningText !== undefined) setRunningText(data.runningText)
-          if (Number.isFinite(data.runningTextSize)) setRunningTextSize(data.runningTextSize)
-          startTick(data.endsAt ?? Date.now() + data.duration * 1000)
-          break
-
-        case 'pause':
-          stopTick()
-          bellPlayedRef.current = false
-          setRemaining(data.remaining)
-          setStatus('paused')
-          break
-
-        case 'resume':
-          setRemaining(remainingFromEnd(data.endsAt ?? Date.now() + data.remaining * 1000))
-          setStatus('running')
-          startTick(data.endsAt ?? Date.now() + data.remaining * 1000)
-          break
-
-        case 'reset':
-          stopTick()
-          bellPlayedRef.current = false
-          setDuration(data.duration)
-          setRemaining(data.duration)
-          setStatus('idle')
-          break
-
-        case 'updateText':
-          setRunningText(data.runningText ?? '')
-          if (Number.isFinite(data.runningTextSize)) setRunningTextSize(data.runningTextSize)
-          break
-
-        default:
-          break
-      }
-    })
+    document.addEventListener('visibilitychange', onVisible)
+    document.addEventListener('fullscreenchange', onFullscreen)
+    window.addEventListener('keydown', onKeyDown)
 
     return () => {
-      pusher.disconnect()
-      stopTick()
+      cleanup = true
+      document.removeEventListener('visibilitychange', onVisible)
+      document.removeEventListener('fullscreenchange', onFullscreen)
+      window.removeEventListener('keydown', onKeyDown)
+      wakeLock?.release()
     }
-  }, [startTick])
+  }, [toggleFullscreen])
 
-  // ── Color scheme ─────────────────────────────────────────────────────────
-  const isDone    = status === 'done'
-  const isWarning = !isDone && remaining <= 30  && remaining > 0
-  const isCaution = !isDone && remaining <= 120 && remaining > 30
+  useEffect(() => {
+    const timer = window.setTimeout(() => revealControls(), 0)
+    return () => {
+      window.clearTimeout(timer)
+      window.clearTimeout(window.__displayControlsTimer)
+    }
+  }, [revealControls])
 
-  const bgClass    = isDone    ? 'bg-gray-950' : isWarning ? 'bg-gray-950' : 'bg-gray-950'
-  const timerClass =
-    isDone    ? 'text-red-500 animate-blink' :
-    isWarning ? 'text-red-400' :
-    isCaution ? 'text-yellow-400' :
-                'text-emerald-400'
-
-  const statusText =
-    isDone           ? '⏰  WAKTU HABIS!' :
-    status === 'running' ? '' :
-    status === 'paused'  ? '⏸  Dijeda' :
-                            'Menunggu sinyal dari Admin…'
-
-  const progress = duration > 0 ? (remaining / duration) * 100 : 0
-
-  // ─────────────────────────────────────────────────────────────────────────
   return (
-    <div
-      className={`relative min-h-screen ${bgClass} flex flex-col items-center justify-center no-select overflow-hidden`}
-      onMouseMove={resetHideTimer}
-      onClick={resetHideTimer}
+    <main
+      className="h-screen w-screen overflow-hidden bg-black"
+      onMouseMove={revealControls}
+      onClick={revealControls}
     >
-      {/* ── Background glow ── */}
-      <div
-        className={`absolute inset-0 pointer-events-none transition-all duration-1000 ${
-          isDone    ? 'opacity-30 bg-red-900' :
-          isWarning ? 'opacity-20 bg-red-900' :
-          isCaution ? 'opacity-10 bg-yellow-900' :
-                      'opacity-0'
-        }`}
+      <TimerDisplay
+        state={timerState}
+        tick={tick}
+        connectionState={connectionState}
       />
 
-      {/* ── Fullscreen button ── */}
       <button
+        type="button"
         onClick={toggleFullscreen}
-        className={`absolute top-4 right-4 p-2 rounded-lg text-white/30 hover:text-white/80 transition-all ${showControls ? 'opacity-100' : 'opacity-0'}`}
+        className={`fixed right-5 top-5 z-20 rounded-lg border border-white/10 bg-black/40 p-3 text-white/70 backdrop-blur transition hover:text-white ${
+          showControls ? 'opacity-100' : 'pointer-events-none opacity-0'
+        }`}
+        aria-label="Toggle fullscreen"
       >
-        {isFullscreen ? <Minimize2 size={28} /> : <Maximize2 size={28} />}
+        {isFullscreen ? <Minimize2 size={22} /> : <Maximize2 size={22} />}
       </button>
-
-      {/* ── Main timer ── */}
-      <div className="flex-1 flex flex-col items-center justify-center w-full px-4">
-        <div
-          className={`font-mono font-black leading-none ${timerClass} transition-colors duration-500 select-none`}
-          style={{ fontSize: 'clamp(100px, 22vw, 320px)' }}
-        >
-          {fmt(remaining)}
-        </div>
-
-        {/* Status label */}
-        {statusText && (
-          <p
-            className={`mt-4 font-bold tracking-widest uppercase ${isDone ? 'text-red-400 animate-blink text-3xl' : 'text-gray-500 text-xl'}`}
-          >
-            {statusText}
-          </p>
-        )}
-
-        {/* Progress bar */}
-        {duration > 0 && (
-          <div className="w-full max-w-2xl mt-8 h-1.5 bg-gray-800 rounded-full overflow-hidden">
-            <div
-              className={`h-full rounded-full transition-all duration-1000 ${
-                isDone || isWarning ? 'bg-red-500' :
-                isCaution ? 'bg-yellow-400' : 'bg-emerald-500'
-              }`}
-              style={{ width: `${progress}%` }}
-            />
-          </div>
-        )}
-      </div>
-
-      {/* ── Running Text ── */}
-      {runningText && (
-        <div className="w-full bg-black/60 border-t border-white/10 py-3 overflow-hidden flex-shrink-0">
-          <div
-            className="marquee-text text-white font-semibold tracking-wide px-4"
-            style={{ fontSize: `${runningTextSize}px`, lineHeight: 1.2 }}
-          >
-            {runningText}
-            &ensp;·&ensp;
-            {runningText}
-            &ensp;·&ensp;
-            {runningText}
-          </div>
-        </div>
-      )}
-    </div>
+    </main>
   )
 }

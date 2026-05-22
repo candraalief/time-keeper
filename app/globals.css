@@ -43,3 +43,27 @@
   white-space: nowrap;
   animation: marquee-scroll 28s linear infinite;
 }
+
+.font-display {
+  font-family: var(--font-display), Impact, Haettenschweiler, 'Arial Narrow Bold', sans-serif;
+}
+
+@keyframes ticker-loop {
+  0% { transform: translateX(100vw); }
+  100% { transform: translateX(-100%); }
+}
+
+.ticker-track {
+  display: inline-block;
+  min-width: max-content;
+  animation: ticker-loop 26s linear infinite;
+}
+
+@keyframes soft-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.015); opacity: 0.82; }
+}
+
+.animate-soft-pulse {
+  animation: soft-pulse 1.2s ease-in-out infinite;
+}

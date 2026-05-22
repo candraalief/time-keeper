@@ -1,467 +1,429 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback } from 'react'
-import Pusher from 'pusher-js'
-import {
-  Play, Pause, RotateCcw, Wifi, WifiOff,
-  Send, ChevronUp, ChevronDown, Home
-} from 'lucide-react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
+import {
+  ChevronDown,
+  ChevronUp,
+  Home,
+  Monitor,
+  Send,
+  Settings2,
+} from 'lucide-react'
+import AgendaPanel from '@/components/admin/AgendaPanel'
+import MiniDisplay from '@/components/admin/MiniDisplay'
+import RunningTextInput from '@/components/admin/RunningTextInput'
+import SessionForm from '@/components/admin/SessionForm'
+import TimerControls from '@/components/admin/TimerControls'
+import ConnectionStatus from '@/components/shared/ConnectionStatus'
+import ToastStack from '@/components/shared/Toast'
+import { usePusherControl } from '@/hooks/usePusher'
+import { useTimerState } from '@/hooks/useTimerState'
+import { useTimerTick } from '@/hooks/useTimerTick'
+import {
+  DEFAULT_EVENT_TITLE,
+  DISPLAY_THEMES,
+  clamp,
+  formatDuration,
+  normalizeTimerState,
+  partsToSeconds,
+  secondsToParts,
+} from '@/lib/timer'
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
-const fmt = (s) => {
-  const m = Math.floor(Math.abs(s) / 60)
-  const sec = Math.abs(s) % 60
-  return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
-}
+function useToasts() {
+  const [toasts, setToasts] = useState([])
 
-const clamp = (v, min, max) => Math.min(Math.max(v, min), max)
-const remainingFromEnd = (endsAt) => Math.max(0, Math.ceil((endsAt - Date.now()) / 1000))
-const DEFAULT_TEXT_SIZE = 28
-
-// ─── Component ───────────────────────────────────────────────────────────────
-export default function AdminPage() {
-  // Input state
-  const [inputMinutes, setInputMinutes] = useState(10)
-  const [inputSeconds, setInputSeconds] = useState(0)
-  const [runningText, setRunningText]   = useState('')
-  const [runningTextSize, setRunningTextSize] = useState(DEFAULT_TEXT_SIZE)
-
-  // Timer state (local mirror for admin UI)
-  const [timerStatus, setTimerStatus]   = useState('idle')  // idle | running | paused
-  const [remaining, setRemaining]       = useState(0)
-  const [duration, setDuration]         = useState(0)
-
-  // Connection
-  const [isConnected, setIsConnected]   = useState(false)
-  const [isSending, setIsSending]       = useState(false)
-
-  const intervalRef   = useRef(null)
-  const remainingRef  = useRef(0)
-  const endsAtRef     = useRef(null)
-  const didMountRef   = useRef(false)
-  const lastTextRef   = useRef(runningText)
-  const lastTextSizeRef = useRef(runningTextSize)
-
-  useEffect(() => { remainingRef.current = remaining }, [remaining])
-
-  // ── Pusher: subscribe so admin also mirrors display state ──────────────────
-  // ── Local countdown so admin screen reflects timer ─────────────────────────
-  const startLocalTick = useCallback((endsAt) => {
-    if (intervalRef.current) clearInterval(intervalRef.current)
-    endsAtRef.current = endsAt
-
-    const syncRemaining = () => {
-      const rem = remainingFromEnd(endsAt)
-      if (rem <= 0) {
-        clearInterval(intervalRef.current)
-        setTimerStatus('idle')
-      }
-      setRemaining(rem)
-      remainingRef.current = rem
-    }
-
-    syncRemaining()
-    intervalRef.current = setInterval(syncRemaining, 250)
+  const pushToast = useCallback((toast) => {
+    const id = crypto.randomUUID()
+    setToasts((current) => [...current, { id, type: 'info', ...toast }])
+    window.setTimeout(() => {
+      setToasts((current) => current.filter((item) => item.id !== id))
+    }, 4200)
   }, [])
 
-  const stopLocalTick = () => {
-    if (intervalRef.current) clearInterval(intervalRef.current)
-  }
+  const dismissToast = useCallback((id) => {
+    setToasts((current) => current.filter((item) => item.id !== id))
+  }, [])
 
-  useEffect(() => () => stopLocalTick(), [])
+  return { toasts, pushToast, dismissToast }
+}
 
-  const currentRemaining = useCallback(() => {
-    if (timerStatus === 'running' && endsAtRef.current) {
-      return remainingFromEnd(endsAtRef.current)
-    }
-    return remainingRef.current
-  }, [timerStatus])
+export default function AdminPage() {
+  const { toasts, pushToast, dismissToast } = useToasts()
+  const {
+    timerState,
+    applyControl,
+    sendControl,
+    isSending,
+  } = useTimerState({
+    onError: (error) => pushToast({ type: 'error', title: 'Timer error', message: error.message }),
+  })
+  const connectionState = usePusherControl(applyControl)
+  const programTick = useTimerTick(timerState)
 
-  const applyControl = useCallback((data) => {
-    switch (data.action) {
-      case 'start': {
-        const endsAt = data.endsAt ?? Date.now() + data.duration * 1000
-        setDuration(data.duration)
-        setRemaining(remainingFromEnd(endsAt))
-        setTimerStatus('running')
-        if (data.runningText !== undefined) {
-          setRunningText(data.runningText)
-          lastTextRef.current = data.runningText ?? ''
-        }
-        if (Number.isFinite(data.runningTextSize)) {
-          setRunningTextSize(data.runningTextSize)
-          lastTextSizeRef.current = data.runningTextSize
-        }
-        startLocalTick(endsAt)
-        break
-      }
+  const [eventTitle, setEventTitle] = useState(DEFAULT_EVENT_TITLE)
+  const [isEditingTitle, setIsEditingTitle] = useState(false)
+  const [draftState, setDraftState] = useState(() => normalizeTimerState())
+  const [isDirty, setIsDirty] = useState(false)
+  const [sessions, setSessions] = useState([])
+  const [sessionForm, setSessionForm] = useState(null)
+  const [isSavingSession, setIsSavingSession] = useState(false)
+  const previewTick = useTimerTick(draftState)
 
-      case 'pause':
-        stopLocalTick()
-        endsAtRef.current = null
-        setRemaining(data.remaining)
-        setTimerStatus('paused')
-        break
-
-      case 'resume': {
-        const endsAt = data.endsAt ?? Date.now() + data.remaining * 1000
-        setRemaining(remainingFromEnd(endsAt))
-        setTimerStatus('running')
-        startLocalTick(endsAt)
-        break
-      }
-
-      case 'reset':
-        stopLocalTick()
-        endsAtRef.current = null
-        setDuration(data.duration)
-        setRemaining(data.duration)
-        setTimerStatus('idle')
-        break
-
-      case 'updateText':
-        setRunningText(data.runningText ?? '')
-        lastTextRef.current = data.runningText ?? ''
-        if (Number.isFinite(data.runningTextSize)) {
-          setRunningTextSize(data.runningTextSize)
-          lastTextSizeRef.current = data.runningTextSize
-        }
-        break
-
-      default:
-        break
-    }
-  }, [startLocalTick])
-
-  const applySavedState = useCallback((state) => {
-    setDuration(state.duration)
-    setRunningText(state.runningText ?? '')
-    lastTextRef.current = state.runningText ?? ''
-    setRunningTextSize(state.runningTextSize ?? DEFAULT_TEXT_SIZE)
-    lastTextSizeRef.current = state.runningTextSize ?? DEFAULT_TEXT_SIZE
-
-    if (state.status === 'running' && state.endsAt) {
-      setTimerStatus('running')
-      setRemaining(remainingFromEnd(state.endsAt))
-      startLocalTick(state.endsAt)
-      return
-    }
-
-    stopLocalTick()
-    endsAtRef.current = null
-    setTimerStatus(state.status === 'paused' ? 'paused' : 'idle')
-    setRemaining(state.remaining ?? 0)
-  }, [startLocalTick])
+  const durationParts = secondsToParts(draftState.duration)
+  const previewChanged = isDirty || draftState.runningText !== timerState.runningText || draftState.theme !== timerState.theme
 
   useEffect(() => {
-    const pusher = new Pusher(process.env.NEXT_PUBLIC_PUSHER_KEY, {
-      cluster: process.env.NEXT_PUBLIC_PUSHER_CLUSTER,
-    })
-
-    pusher.connection.bind('connected',    () => setIsConnected(true))
-    pusher.connection.bind('disconnected', () => setIsConnected(false))
-    pusher.connection.bind('error',        () => setIsConnected(false))
-
-    const channel = pusher.subscribe('seminar-timer')
-    channel.bind('control', applyControl)
-
-    return () => pusher.disconnect()
-  }, [applyControl])
+    const savedTitle = window.localStorage.getItem('seminar-event-title')
+    if (!savedTitle) return undefined
+    const timer = window.setTimeout(() => setEventTitle(savedTitle), 0)
+    return () => window.clearTimeout(timer)
+  }, [])
 
   useEffect(() => {
-    const loadState = async () => {
-      try {
-        const response = await fetch('/api/state')
-        const result = await response.json()
-        if (result.success) applySavedState(result.state)
-      } catch (e) {
-        console.error('Load timer state error:', e)
-      }
-    }
+    window.localStorage.setItem('seminar-event-title', eventTitle)
+  }, [eventTitle])
 
-    loadState()
-  }, [applySavedState])
+  useEffect(() => {
+    if (isDirty) return undefined
+    const timer = window.setTimeout(() => setDraftState(timerState), 0)
+    return () => window.clearTimeout(timer)
+  }, [isDirty, timerState])
 
-  // ── API helpers ────────────────────────────────────────────────────────────
-  const broadcast = async (payload) => {
-    setIsSending(true)
+  const fetchSessions = useCallback(async () => {
     try {
-      await fetch('/api/control', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify(payload),
-      })
-    } catch (e) {
-      console.error('Broadcast error:', e)
-    } finally {
-      setIsSending(false)
+      const response = await fetch('/api/sessions', { cache: 'no-store' })
+      const result = await response.json()
+      if (!response.ok || !result.success) throw new Error(result.error || 'Failed to load sessions')
+      setSessions(result.sessions)
+    } catch (error) {
+      pushToast({ type: 'error', title: 'Agenda error', message: error.message })
+    }
+  }, [pushToast])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => fetchSessions(), 0)
+    return () => window.clearTimeout(timer)
+  }, [fetchSessions])
+
+  const updateDraft = (updates) => {
+    setDraftState((current) => normalizeTimerState({ ...current, ...updates }))
+    setIsDirty(true)
+  }
+
+  const changeDuration = (part, value) => {
+    const nextDuration = part === 'minutes'
+      ? partsToSeconds(value, durationParts.seconds)
+      : partsToSeconds(durationParts.minutes, clamp(value, 0, 59))
+    updateDraft({
+      status: 'idle',
+      duration: nextDuration,
+      remaining: nextDuration,
+      endsAt: null,
+      overtime: false,
+    })
+  }
+
+  const currentRemaining = () => programTick.remaining
+
+  const send = async (payload, successTitle) => {
+    try {
+      await sendControl(payload)
+      pushToast({ type: 'success', title: successTitle })
+    } catch (error) {
+      pushToast({ type: 'error', title: 'Request failed', message: error.message })
     }
   }
 
-  // ── Controls ───────────────────────────────────────────────────────────────
-  const handleStart = () => {
-    const totalSec = inputMinutes * 60 + inputSeconds
-    if (totalSec <= 0) return
-    const endsAt = Date.now() + totalSec * 1000
-    setDuration(totalSec)
-    setRemaining(totalSec)
-    setTimerStatus('running')
-    startLocalTick(endsAt)
-    broadcast({ action: 'start', duration: totalSec, runningText, runningTextSize })
-  }
+  const payloadFromDraft = useMemo(() => ({
+    duration: draftState.duration,
+    runningText: draftState.runningText,
+    theme: draftState.theme,
+    sessionId: draftState.sessionId,
+    sessionTitle: draftState.sessionTitle,
+    sessionSpeaker: draftState.sessionSpeaker,
+    sessionColor: draftState.sessionColor,
+  }), [draftState])
 
-  const handleResume = () => {
-    const rem = currentRemaining()
-    const endsAt = Date.now() + rem * 1000
-    setTimerStatus('running')
-    startLocalTick(endsAt)
-    broadcast({ action: 'resume', remaining: rem })
+  const handleStart = () => {
+    if (draftState.duration <= 0) return
+    setIsDirty(false)
+    send({ action: 'start', ...payloadFromDraft }, 'Program started')
   }
 
   const handlePause = () => {
-    const rem = currentRemaining()
-    stopLocalTick()
-    endsAtRef.current = null
-    setTimerStatus('paused')
-    setRemaining(rem)
-    broadcast({ action: 'pause', remaining: rem })
+    send({ action: 'pause', remaining: currentRemaining() }, 'Program paused')
+  }
+
+  const handleResume = () => {
+    send({ action: 'resume', remaining: currentRemaining() }, 'Program resumed')
   }
 
   const handleReset = () => {
-    stopLocalTick()
-    endsAtRef.current = null
-    const totalSec = inputMinutes * 60 + inputSeconds
-    setDuration(totalSec)
-    setRemaining(totalSec)
-    setTimerStatus('idle')
-    broadcast({ action: 'reset', duration: totalSec })
+    send({ action: 'reset', duration: draftState.duration }, 'Timer reset')
   }
 
-  const handleSendText = () => {
-    lastTextRef.current = runningText
-    lastTextSizeRef.current = runningTextSize
-    broadcast({ action: 'updateText', runningText, runningTextSize })
+  const handleTake = async () => {
+    setIsDirty(false)
+    await send({ action: 'take', ...payloadFromDraft }, 'Preview taken to program')
   }
 
-  useEffect(() => {
-    if (!didMountRef.current) {
-      didMountRef.current = true
-      return
+  const handleLoadSession = (session) => {
+    updateDraft({
+      duration: session.duration,
+      remaining: session.duration,
+      sessionId: session.id,
+      sessionTitle: session.title,
+      sessionSpeaker: session.speaker,
+      sessionColor: session.color,
+      runningText: session.speaker ? `${session.title} - ${session.speaker}` : session.title,
+    })
+    pushToast({ type: 'info', title: 'Loaded to preview', message: session.title })
+  }
+
+  const handleSaveSession = async (form) => {
+    setIsSavingSession(true)
+    try {
+      const response = await fetch('/api/sessions', {
+        method: sessionForm?.id ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...form,
+          id: sessionForm?.id,
+          orderIndex: sessionForm?.orderIndex ?? sessions.length,
+        }),
+      })
+      const result = await response.json()
+      if (!response.ok || !result.success) throw new Error(result.error || 'Failed to save session')
+      setSessionForm(null)
+      await fetchSessions()
+      pushToast({ type: 'success', title: 'Session saved' })
+    } catch (error) {
+      pushToast({ type: 'error', title: 'Session save failed', message: error.message })
+    } finally {
+      setIsSavingSession(false)
     }
+  }
 
-    const sendTimer = setTimeout(() => {
-      if (
-        runningText === lastTextRef.current &&
-        runningTextSize === lastTextSizeRef.current
-      ) return
-      lastTextRef.current = runningText
-      lastTextSizeRef.current = runningTextSize
-      broadcast({ action: 'updateText', runningText, runningTextSize })
-    }, 500)
+  const handleDeleteSession = async (session) => {
+    if (!window.confirm(`Delete "${session.title}"?`)) return
+    try {
+      const response = await fetch(`/api/sessions?id=${session.id}`, { method: 'DELETE' })
+      const result = await response.json()
+      if (!response.ok || !result.success) throw new Error(result.error || 'Failed to delete session')
+      await fetchSessions()
+      pushToast({ type: 'success', title: 'Session deleted' })
+    } catch (error) {
+      pushToast({ type: 'error', title: 'Delete failed', message: error.message })
+    }
+  }
 
-    return () => clearTimeout(sendTimer)
-  }, [runningText, runningTextSize])
+  const handleReorderSessions = async (nextSessions) => {
+    setSessions(nextSessions)
+    try {
+      const response = await fetch('/api/sessions', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessions: nextSessions }),
+      })
+      const result = await response.json()
+      if (!response.ok || !result.success) throw new Error(result.error || 'Failed to reorder sessions')
+      setSessions(result.sessions)
+    } catch (error) {
+      pushToast({ type: 'error', title: 'Reorder failed', message: error.message })
+      fetchSessions()
+    }
+  }
 
-  // ── Spinners ───────────────────────────────────────────────────────────────
-  const adjustMinutes = (delta) => setInputMinutes(v => clamp(v + delta, 0, 999))
-  const adjustSeconds = (delta) => setInputSeconds(v => {
-    const n = v + delta
-    if (n < 0)  { adjustMinutes(-1); return 59 }
-    if (n > 59) { adjustMinutes(1);  return 0  }
-    return n
-  })
-
-  // ── Progress ───────────────────────────────────────────────────────────────
-  const progress = duration > 0 ? (remaining / duration) * 100 : 0
-
-  // ── Color hint ─────────────────────────────────────────────────────────────
-  const colorHint =
-    timerStatus === 'idle'
-      ? 'text-gray-400'
-      : remaining <= 30
-      ? 'text-red-400'
-      : remaining <= 120
-      ? 'text-yellow-400'
-      : 'text-emerald-400'
-
-  // ─────────────────────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-gray-950 text-white pb-8">
-      {/* ── Header ── */}
-      <header className="sticky top-0 z-10 bg-gray-900/90 backdrop-blur border-b border-gray-800 flex items-center justify-between px-4 py-3">
-        <div className="flex items-center gap-3">
-          <Link href="/" className="text-gray-400 hover:text-white transition-colors">
-            <Home size={20} />
-          </Link>
-          <h1 className="text-lg font-bold">Dashboard Admin</h1>
-        </div>
-        <div
-          className={`flex items-center gap-1.5 text-sm font-medium px-3 py-1 rounded-full
-            ${isConnected
-              ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
-              : 'bg-red-950 text-red-400 border border-red-800'}`}
-        >
-          {isConnected ? <Wifi size={14} /> : <WifiOff size={14} />}
-          {isConnected ? 'Online' : 'Offline'}
+    <main className="min-h-screen bg-zinc-950 text-white">
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
+      {sessionForm !== null && (
+        <SessionForm
+          key={sessionForm?.id ?? 'new-session'}
+          session={sessionForm}
+          onClose={() => setSessionForm(null)}
+          onSubmit={handleSaveSession}
+          isSaving={isSavingSession}
+        />
+      )}
+
+      <header className="sticky top-0 z-30 border-b border-white/10 bg-zinc-950/90 px-4 py-3 backdrop-blur">
+        <div className="mx-auto flex max-w-7xl items-center justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-3">
+            <Link href="/" className="rounded-lg p-2 text-zinc-400 transition hover:bg-white/10 hover:text-white">
+              <Home size={18} />
+            </Link>
+            {isEditingTitle ? (
+              <input
+                autoFocus
+                value={eventTitle}
+                onChange={(event) => setEventTitle(event.target.value)}
+                onBlur={() => setIsEditingTitle(false)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') setIsEditingTitle(false)
+                }}
+                className="min-w-0 rounded-lg border border-sky-500 bg-zinc-900 px-3 py-2 text-lg font-black outline-none"
+              />
+            ) : (
+              <button
+                type="button"
+                onClick={() => setIsEditingTitle(true)}
+                className="min-w-0 truncate text-left text-lg font-black text-white"
+              >
+                {eventTitle}
+              </button>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <ConnectionStatus state={connectionState} />
+            <Link
+              href="/display"
+              className="hidden items-center gap-2 rounded-lg bg-zinc-900 px-3 py-2 text-sm font-bold text-zinc-200 transition hover:bg-zinc-800 sm:inline-flex"
+            >
+              <Monitor size={16} />
+              Display
+            </Link>
+          </div>
         </div>
       </header>
 
-      <div className="max-w-md mx-auto px-4 mt-6 space-y-4">
-
-        {/* ── Timer Preview (mini) ── */}
-        <div className="bg-gray-900 rounded-2xl p-5 text-center border border-gray-800">
-          <p className="text-xs text-gray-500 uppercase tracking-widest mb-1">Sisa Waktu</p>
-          <div className={`text-6xl font-black font-mono ${colorHint}`}>
-            {fmt(remaining)}
-          </div>
-          {/* Progress bar */}
-          <div className="mt-3 h-2 bg-gray-800 rounded-full overflow-hidden">
-            <div
-              className={`h-full rounded-full transition-all duration-1000 ${
-                remaining <= 30 ? 'bg-red-500' :
-                remaining <= 120 ? 'bg-yellow-400' : 'bg-emerald-500'
-              }`}
-              style={{ width: `${progress}%` }}
-            />
-          </div>
-          <p className="text-xs text-gray-600 mt-1.5">
-            {timerStatus === 'idle'    && 'Belum dimulai'}
-            {timerStatus === 'running' && '▶ Berjalan'}
-            {timerStatus === 'paused'  && '⏸ Dijeda'}
-          </p>
-        </div>
-
-        {/* ── Duration Setter ── */}
-        <div className="bg-gray-900 rounded-2xl p-5 border border-gray-800">
-          <p className="text-sm font-semibold text-gray-400 mb-4">Atur Durasi</p>
-          <div className="flex items-center justify-center gap-4">
-            {/* Minutes */}
-            <div className="flex flex-col items-center gap-1">
-              <button onClick={() => adjustMinutes(1)}  className="p-2 rounded-lg hover:bg-gray-800 active:bg-gray-700"><ChevronUp  size={20} /></button>
-              <input
-                type="number"
-                value={inputMinutes}
-                onChange={e => setInputMinutes(clamp(parseInt(e.target.value) || 0, 0, 999))}
-                className="w-24 bg-gray-800 text-white text-4xl font-black text-center py-2 rounded-xl border border-gray-700 focus:border-blue-500 focus:outline-none"
-              />
-              <button onClick={() => adjustMinutes(-1)} className="p-2 rounded-lg hover:bg-gray-800 active:bg-gray-700"><ChevronDown size={20} /></button>
-              <span className="text-xs text-gray-500">Menit</span>
-            </div>
-
-            <span className="text-5xl font-black text-gray-500 pb-4">:</span>
-
-            {/* Seconds */}
-            <div className="flex flex-col items-center gap-1">
-              <button onClick={() => adjustSeconds(1)}  className="p-2 rounded-lg hover:bg-gray-800 active:bg-gray-700"><ChevronUp  size={20} /></button>
-              <input
-                type="number"
-                value={inputSeconds}
-                onChange={e => setInputSeconds(clamp(parseInt(e.target.value) || 0, 0, 59))}
-                className="w-24 bg-gray-800 text-white text-4xl font-black text-center py-2 rounded-xl border border-gray-700 focus:border-blue-500 focus:outline-none"
-              />
-              <button onClick={() => adjustSeconds(-1)} className="p-2 rounded-lg hover:bg-gray-800 active:bg-gray-700"><ChevronDown size={20} /></button>
-              <span className="text-xs text-gray-500">Detik</span>
-            </div>
-          </div>
-        </div>
-
-        {/* ── Controls ── */}
-        <div className="grid grid-cols-3 gap-3">
-          {/* Start / Resume */}
-          {timerStatus !== 'running' ? (
-            <button
-              onClick={timerStatus === 'paused' ? handleResume : handleStart}
-              disabled={isSending}
-              className="col-span-2 flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 disabled:opacity-50 text-white py-5 rounded-2xl text-lg font-bold transition-all shadow-lg shadow-emerald-900/30"
-            >
-              <Play size={22} />
-              {timerStatus === 'paused' ? 'Lanjutkan' : 'Mulai'}
-            </button>
-          ) : (
-            <button
-              onClick={handlePause}
-              disabled={isSending}
-              className="col-span-2 flex items-center justify-center gap-2 bg-yellow-600 hover:bg-yellow-500 active:bg-yellow-700 disabled:opacity-50 text-white py-5 rounded-2xl text-lg font-bold transition-all shadow-lg shadow-yellow-900/30"
-            >
-              <Pause size={22} />
-              Jeda
-            </button>
-          )}
-
-          {/* Reset */}
-          <button
-            onClick={handleReset}
-            disabled={isSending}
-            className="flex items-center justify-center gap-2 bg-gray-700 hover:bg-gray-600 active:bg-gray-800 disabled:opacity-50 text-white py-5 rounded-2xl text-lg font-bold transition-all"
-          >
-            <RotateCcw size={22} />
-          </button>
-        </div>
-
-        {/* ── Quick Durations ── */}
-        <div className="bg-gray-900 rounded-2xl p-4 border border-gray-800">
-          <p className="text-xs text-gray-500 mb-3 uppercase tracking-widest">Durasi Cepat</p>
-          <div className="grid grid-cols-4 gap-2">
-            {[
-              { label: '5m',  m: 5,  s: 0 },
-              { label: '10m', m: 10, s: 0 },
-              { label: '15m', m: 15, s: 0 },
-              { label: '20m', m: 20, s: 0 },
-              { label: '30m', m: 30, s: 0 },
-              { label: '45m', m: 45, s: 0 },
-              { label: '60m', m: 60, s: 0 },
-              { label: '90m', m: 90, s: 0 },
-            ].map(({ label, m, s }) => (
+      <div className="mx-auto grid max-w-7xl gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_420px]">
+        <div className="space-y-4">
+          <section className="rounded-xl border border-white/10 bg-zinc-950/80 p-4">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-black uppercase tracking-[0.2em] text-sky-300">Operator console</p>
+                <h1 className="mt-1 text-2xl font-black">Preview & Program</h1>
+              </div>
               <button
-                key={label}
-                onClick={() => { setInputMinutes(m); setInputSeconds(s) }}
-                className="bg-gray-800 hover:bg-gray-700 active:bg-gray-600 text-white text-sm font-semibold py-2 rounded-xl transition-all"
+                type="button"
+                disabled={!previewChanged || isSending}
+                onClick={handleTake}
+                className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-rose-600 px-5 text-sm font-black text-white transition hover:bg-rose-500 disabled:cursor-not-allowed disabled:bg-zinc-800 disabled:text-zinc-500"
               >
-                {label}
+                <Send size={17} />
+                TAKE
               </button>
-            ))}
-          </div>
+            </div>
+
+            <div className="grid gap-3 xl:grid-cols-2">
+              <MiniDisplay state={draftState} tick={previewTick} mode="preview" />
+              <MiniDisplay state={timerState} tick={programTick} mode="program" />
+            </div>
+          </section>
+
+          <section className="grid gap-4 rounded-xl border border-white/10 bg-zinc-950/80 p-4 md:grid-cols-2">
+            <div className="space-y-4">
+              <div>
+                <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-zinc-300">
+                  <Settings2 size={15} />
+                  Session loaded in preview
+                </div>
+                <input
+                  value={draftState.sessionTitle}
+                  onChange={(event) => updateDraft({ sessionTitle: event.target.value })}
+                  placeholder="Session title"
+                  className="mb-2 w-full rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 text-sm outline-none transition placeholder:text-zinc-600 focus:border-sky-500"
+                />
+                <input
+                  value={draftState.sessionSpeaker}
+                  onChange={(event) => updateDraft({ sessionSpeaker: event.target.value })}
+                  placeholder="Speaker"
+                  className="w-full rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 text-sm outline-none transition placeholder:text-zinc-600 focus:border-sky-500"
+                />
+              </div>
+
+              <div>
+                <p className="mb-2 text-sm font-semibold text-zinc-300">Duration</p>
+                <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-3">
+                  <div className="space-y-1">
+                    <button type="button" onClick={() => changeDuration('minutes', durationParts.minutes + 1)} className="flex w-full justify-center rounded bg-zinc-900 py-1 text-zinc-400 hover:text-white">
+                      <ChevronUp size={18} />
+                    </button>
+                    <input
+                      type="number"
+                      min={0}
+                      value={durationParts.minutes}
+                      onChange={(event) => changeDuration('minutes', Number(event.target.value))}
+                      className="w-full rounded-lg border border-white/10 bg-zinc-900 py-3 text-center text-3xl font-black outline-none focus:border-sky-500"
+                    />
+                    <button type="button" onClick={() => changeDuration('minutes', Math.max(0, durationParts.minutes - 1))} className="flex w-full justify-center rounded bg-zinc-900 py-1 text-zinc-400 hover:text-white">
+                      <ChevronDown size={18} />
+                    </button>
+                    <p className="text-center text-xs text-zinc-500">Minutes</p>
+                  </div>
+                  <span className="text-4xl font-black text-zinc-600">:</span>
+                  <div className="space-y-1">
+                    <button type="button" onClick={() => changeDuration('seconds', clamp(durationParts.seconds + 1, 0, 59))} className="flex w-full justify-center rounded bg-zinc-900 py-1 text-zinc-400 hover:text-white">
+                      <ChevronUp size={18} />
+                    </button>
+                    <input
+                      type="number"
+                      min={0}
+                      max={59}
+                      value={durationParts.seconds}
+                      onChange={(event) => changeDuration('seconds', Number(event.target.value))}
+                      className="w-full rounded-lg border border-white/10 bg-zinc-900 py-3 text-center text-3xl font-black outline-none focus:border-sky-500"
+                    />
+                    <button type="button" onClick={() => changeDuration('seconds', clamp(durationParts.seconds - 1, 0, 59))} className="flex w-full justify-center rounded bg-zinc-900 py-1 text-zinc-400 hover:text-white">
+                      <ChevronDown size={18} />
+                    </button>
+                    <p className="text-center text-xs text-zinc-500">Seconds</p>
+                  </div>
+                </div>
+                <p className="mt-2 text-xs text-zinc-500">Preview duration: {formatDuration(draftState.duration)}</p>
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <p className="mb-2 text-sm font-semibold text-zinc-300">Display theme</p>
+                <div className="grid grid-cols-2 gap-2">
+                  {Object.entries(DISPLAY_THEMES).map(([themeKey, theme]) => (
+                    <button
+                      key={themeKey}
+                      type="button"
+                      onClick={() => updateDraft({ theme: themeKey })}
+                      className={`rounded-lg border px-3 py-2 text-left text-sm font-bold transition ${
+                        draftState.theme === themeKey
+                          ? 'border-sky-400 bg-sky-500/15 text-sky-200'
+                          : 'border-white/10 bg-zinc-900 text-zinc-300 hover:border-white/20'
+                      }`}
+                    >
+                      {theme.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <RunningTextInput
+                value={draftState.runningText}
+                onChange={(runningText) => updateDraft({ runningText })}
+              />
+
+              <TimerControls
+                status={timerState.status}
+                isSending={isSending}
+                onStart={handleStart}
+                onPause={handlePause}
+                onResume={handleResume}
+                onReset={handleReset}
+              />
+            </div>
+          </section>
         </div>
 
-        {/* ── Running Text ── */}
-        <div className="bg-gray-900 rounded-2xl p-5 border border-gray-800">
-          <p className="text-sm font-semibold text-gray-400 mb-3">Teks Berjalan (Running Text)</p>
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={runningText}
-              onChange={e => setRunningText(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && handleSendText()}
-              placeholder="Nama pembicara atau pengumuman..."
-              className="flex-1 bg-gray-800 text-white placeholder-gray-600 px-4 py-3 rounded-xl border border-gray-700 focus:border-blue-500 focus:outline-none text-sm"
-            />
-            <button
-              onClick={handleSendText}
-              disabled={isSending}
-              className="bg-blue-600 hover:bg-blue-500 active:bg-blue-700 disabled:opacity-50 p-3 rounded-xl transition-all"
-            >
-              <Send size={20} />
-            </button>
-          </div>
-          <div className="mt-3 flex items-center gap-3">
-            <span className="text-xs text-gray-500 w-20">Ukuran teks</span>
-            <input
-              type="range"
-              min={16}
-              max={64}
-              step={1}
-              value={runningTextSize}
-              onChange={e => setRunningTextSize(Number(e.target.value))}
-              className="flex-1 accent-blue-500"
-            />
-            <span className="text-xs text-gray-400 w-12 text-right">{runningTextSize}px</span>
-          </div>
-          <p className="text-xs text-gray-600 mt-2">Tekan Enter atau klik kirim untuk update teks di layar display.</p>
-          <p className="text-xs text-gray-600 mt-1">Perubahan juga terkirim otomatis saat kamu mengetik.</p>
-        </div>
-
+        <AgendaPanel
+          sessions={sessions}
+          activeSessionId={timerState.sessionId}
+          onAdd={() => setSessionForm({})}
+          onEdit={setSessionForm}
+          onDelete={handleDeleteSession}
+          onLoad={handleLoadSession}
+          onReorder={handleReorderSessions}
+        />
       </div>
-    </div>
+    </main>
   )
 }

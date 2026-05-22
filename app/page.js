@@ -1,42 +1,98 @@
 import Link from 'next/link'
-import { LayoutDashboard, Monitor, Clock } from 'lucide-react'
+import QRCode from 'qrcode'
+import { LayoutDashboard, Monitor, QrCode, Radio, Timer, Wifi } from 'lucide-react'
 
-export default function Home() {
+function getBaseUrl() {
+  if (process.env.NEXT_PUBLIC_SITE_URL) return process.env.NEXT_PUBLIC_SITE_URL
+  if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`
+  return 'http://localhost:3000'
+}
+
+export default async function Home() {
+  const displayUrl = `${getBaseUrl()}/display`
+  const qrCode = await QRCode.toDataURL(displayUrl, {
+    margin: 1,
+    width: 220,
+    color: {
+      dark: '#09090b',
+      light: '#ffffff',
+    },
+  })
+
   return (
-    <main className="min-h-screen bg-gray-950 flex flex-col items-center justify-center p-6">
-      <div className="text-center mb-12">
-        <div className="flex items-center justify-center gap-3 mb-4">
-          <Clock size={48} className="text-blue-400" />
+    <main className="min-h-screen bg-zinc-950 text-white">
+      <section className="mx-auto grid min-h-screen max-w-6xl items-center gap-10 px-5 py-10 lg:grid-cols-[1fr_360px]">
+        <div>
+          <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-sky-400/30 bg-sky-400/10 px-3 py-1 text-sm font-bold text-sky-200">
+            <Radio size={16} />
+            Broadcast-ready seminar timer
+          </div>
+
+          <h1 className="max-w-3xl text-5xl font-black leading-none tracking-normal text-white md:text-7xl">
+            Seminar Timekeeper
+          </h1>
+          <p className="mt-5 max-w-2xl text-lg leading-8 text-zinc-400">
+            Kontrol timer, agenda, tema display, dan running text dari satu panel operator.
+            Display projector tetap sinkron lewat Pusher dan restore state lewat Supabase.
+          </p>
+
+          <div className="mt-8 grid max-w-xl gap-3 sm:grid-cols-2">
+            <Link
+              href="/admin"
+              className="inline-flex min-h-14 items-center justify-center gap-3 rounded-lg bg-sky-600 px-5 text-base font-black text-white transition hover:bg-sky-500"
+            >
+              <LayoutDashboard size={21} />
+              Buka Admin Panel
+            </Link>
+            <Link
+              href="/display"
+              className="inline-flex min-h-14 items-center justify-center gap-3 rounded-lg bg-emerald-600 px-5 text-base font-black text-white transition hover:bg-emerald-500"
+            >
+              <Monitor size={21} />
+              Buka Display
+            </Link>
+          </div>
+
+          <div className="mt-10 grid max-w-3xl gap-3 md:grid-cols-3">
+            {[
+              ['1', 'Buka Display', 'Pasang laptop ke projector lalu buka halaman display.'],
+              ['2', 'Buka Admin', 'Operator membuka admin panel dari HP atau laptop.'],
+              ['3', 'TAKE Program', 'Load sesi ke preview, lalu TAKE untuk tampil live.'],
+            ].map(([number, title, body]) => (
+              <div key={number} className="rounded-lg border border-white/10 bg-white/[0.03] p-4">
+                <div className="mb-3 flex h-8 w-8 items-center justify-center rounded bg-sky-500 text-sm font-black text-white">
+                  {number}
+                </div>
+                <h2 className="font-black text-white">{title}</h2>
+                <p className="mt-1 text-sm leading-6 text-zinc-400">{body}</p>
+              </div>
+            ))}
+          </div>
         </div>
-        <h1 className="text-5xl font-black text-white mb-3">
-          Seminar Timekeeper
-        </h1>
-        <p className="text-gray-400 text-lg max-w-md mx-auto">
-          Kontrol timer dari HP atau laptop manapun — tampil real-time di proyektor seminar.
-        </p>
-      </div>
 
-      <div className="flex flex-col sm:flex-row gap-4 w-full max-w-sm sm:max-w-none sm:w-auto">
-        <Link
-          href="/admin"
-          className="flex items-center justify-center gap-3 bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white px-10 py-5 rounded-2xl text-xl font-bold transition-all shadow-lg shadow-blue-900/40 hover:scale-105"
-        >
-          <LayoutDashboard size={24} />
-          Dashboard Admin
-        </Link>
+        <aside className="rounded-xl border border-white/10 bg-white/[0.03] p-5">
+          <div className="mb-4 flex items-center gap-2">
+            <QrCode size={20} className="text-sky-300" />
+            <h2 className="font-black">Scan Display URL</h2>
+          </div>
+          <div className="rounded-lg bg-white p-4">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={qrCode} alt="QR code to open display page" className="h-auto w-full" />
+          </div>
+          <p className="mt-3 break-all text-xs leading-5 text-zinc-500">{displayUrl}</p>
 
-        <Link
-          href="/display"
-          className="flex items-center justify-center gap-3 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white px-10 py-5 rounded-2xl text-xl font-bold transition-all shadow-lg shadow-emerald-900/40 hover:scale-105"
-        >
-          <Monitor size={24} />
-          Layar Proyektor
-        </Link>
-      </div>
-
-      <p className="text-gray-600 text-sm mt-10">
-        Buka Admin di HP · Buka Display di laptop yang terhubung ke proyektor
-      </p>
+          <div className="mt-5 grid gap-2 text-sm text-zinc-300">
+            <div className="flex items-center gap-2">
+              <Timer size={16} className="text-emerald-300" />
+              Timestamp-based sync
+            </div>
+            <div className="flex items-center gap-2">
+              <Wifi size={16} className="text-emerald-300" />
+              Pusher realtime events
+            </div>
+          </div>
+        </aside>
+      </section>
     </main>
   )
 }
